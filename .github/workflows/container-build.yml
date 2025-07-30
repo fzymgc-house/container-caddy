@@ -21,20 +21,18 @@ env:
   IMAGE_PREFIX: ${{ github.repository_owner }}
 
 jobs:
-  changes:
+  checkout:
     runs-on: ubuntu-latest
-    outputs:
-      images: ${{ steps.filter.outputs.changes }}
     steps:
       - uses: actions/checkout@v4
 
   build-binaries:
-    needs: changes
-    if: ${{ needs.changes.outputs.images != '[]' || github.event.inputs.force_build == 'true' }}
+    needs: checkout
+    if: ${{ needs.checkout.outputs.images != '[]' || github.event.inputs.force_build == 'true' }}
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        image: ${{ fromJson(needs.changes.outputs.images || '["caddy"]') }}
+        image: ${{ fromJson(needs.checkout.outputs.images || '["caddy"]') }}
         include:
           - image: caddy
             binary: caddy
@@ -79,23 +77,19 @@ jobs:
           retention-days: 1
 
   build-images:
-    needs: [changes, build-binaries]
-    if: ${{ needs.changes.outputs.images != '[]' || github.event.inputs.force_build == 'true' }}
+    needs: [checkout, build-binaries]
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
       security-events: write
       actions: read
-    strategy:
-      matrix:
-        image: ${{ fromJson(needs.changes.outputs.images || '["caddy"]') }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Create binaries directory
-        run: mkdir -p container-images/${{ matrix.image }}/binaries
+        run: mkdir -p container-images/binaries
 
       - name: Download all binary artifacts
         uses: actions/download-artifact@v4
@@ -116,32 +110,31 @@ jobs:
             if [ -d "/tmp/artifacts/caddy-linux-${arch}" ]; then
               echo "Moving caddy-linux-${arch}"
               cp -v "/tmp/artifacts/caddy-linux-${arch}/caddy-linux-${arch}" \
-                "container-images/${{ matrix.image }}/binaries/caddy-linux-${arch}"
+                "container-images/binaries/caddy-linux-${arch}"
             fi
           done
 
           # Debug: Show final structure
           echo "Final binaries structure:"
-          ls -la container-images/${{ matrix.image }}/binaries/
+          ls -la container-images/binaries/
 
           # Set permissions
-          chmod +x container-images/${{ matrix.image }}/binaries/*
+          chmod +x container-images/binaries/*
 
       - name: Download GeoIP database
-        if: matrix.image == 'caddy'
         env:
           MAXMIND_LICENSE_KEY: ${{ secrets.MAXMIND_LICENSE_KEY }}
         run: |
-          mkdir -p container-images/${{ matrix.image }}/geoip
+          mkdir -p container-images/geoip
           if [ -n "$MAXMIND_LICENSE_KEY" ]; then
             wget "https://download.maxmind.com/app/geoip_download?edition_id=GeoLite2-Country&license_key=${MAXMIND_LICENSE_KEY}&suffix=tar.gz" -O /tmp/GeoLite2-Country.tar.gz
             tar -xzf /tmp/GeoLite2-Country.tar.gz -C /tmp
-            cp /tmp/GeoLite2-Country_*/GeoLite2-Country.mmdb container-images/${{ matrix.image }}/geoip/
+            cp /tmp/GeoLite2-Country_*/GeoLite2-Country.mmdb container-images/geoip/
             echo "GeoIP database downloaded successfully"
           else
             echo "MAXMIND_LICENSE_KEY not set, creating empty geoip directory"
             # Create empty file to ensure COPY doesn't fail
-            touch container-images/${{ matrix.image }}/geoip/.placeholder
+            touch container-images/geoip/.placeholder
           fi
 
       - name: Set up QEMU
@@ -161,7 +154,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/${{ matrix.image }}
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/caddy
           tags: |
             type=edge,enable=true,priority=700,prefix=,suffix=,branch=$repo.default_branch
             type=ref,event=branch
@@ -176,8 +169,8 @@ jobs:
         id: build
         uses: docker/build-push-action@v5
         with:
-          context: container-images/${{ matrix.image }}
-          file: container-images/${{ matrix.image }}/Dockerfile.prebuilt
+          context: cloud-edge-node/container-images/caddy
+          file: cloud-edge-node/container-images/caddy/Dockerfile.prebuilt
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
@@ -189,7 +182,7 @@ jobs:
         if: github.event_name != 'pull_request'
         uses: aquasecurity/trivy-action@master
         with:
-          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/${{ matrix.image }}@${{ steps.build.outputs.digest }}
+          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/caddy@${{ steps.build.outputs.digest }}
           format: 'sarif'
           output: 'trivy-results.sarif'
 
