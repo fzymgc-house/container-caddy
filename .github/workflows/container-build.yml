@@ -1,0 +1,201 @@
+name: Build and Publish Container Images
+
+on:
+  push:
+    branches:
+      - main
+      - 'feat/**'
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      force_build:
+        description: 'Force build all images'
+        required: false
+        type: boolean
+        default: false
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_PREFIX: ${{ github.repository_owner }}
+
+jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      images: ${{ steps.filter.outputs.changes }}
+    steps:
+      - uses: actions/checkout@v4
+
+  build-binaries:
+    needs: changes
+    if: ${{ needs.changes.outputs.images != '[]' || github.event.inputs.force_build == 'true' }}
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        image: ${{ fromJson(needs.changes.outputs.images || '["caddy"]') }}
+        include:
+          - image: caddy
+            binary: caddy
+        platform:
+          - os: linux
+            arch: amd64
+          - os: linux
+            arch: arm64
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: 'stable'
+
+      - name: Install xcaddy
+        run: go install github.com/caddyserver/xcaddy/cmd/xcaddy@latest
+
+      - name: Build Caddy binary
+        if: matrix.image == 'caddy'
+        env:
+          GOOS: ${{ matrix.platform.os }}
+          GOARCH: ${{ matrix.platform.arch }}
+          CGO_ENABLED: 0
+        run: |
+          xcaddy build \
+            --with github.com/caddy-dns/cloudflare \
+            --with github.com/hslatman/caddy-crowdsec-bouncer/http \
+            --with github.com/greenpau/caddy-security \
+            --with github.com/caddyserver/transform-encoder \
+            --with github.com/mholt/caddy-ratelimit \
+            --with github.com/porech/caddy-maxmind-geolocation \
+            --output ${{ matrix.binary }}-${{ matrix.platform.os }}-${{ matrix.platform.arch }}
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.binary }}-${{ matrix.platform.os }}-${{ matrix.platform.arch }}
+          path: ${{ matrix.binary }}-${{ matrix.platform.os }}-${{ matrix.platform.arch }}
+          retention-days: 1
+
+  build-images:
+    needs: [changes, build-binaries]
+    if: ${{ needs.changes.outputs.images != '[]' || github.event.inputs.force_build == 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      security-events: write
+      actions: read
+    strategy:
+      matrix:
+        image: ${{ fromJson(needs.changes.outputs.images || '["caddy"]') }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Create binaries directory
+        run: mkdir -p container-images/${{ matrix.image }}/binaries
+
+      - name: Download all binary artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: caddy-*
+          path: /tmp/artifacts/
+
+      - name: Move binaries to build context
+        run: |
+          # Debug: Show downloaded artifacts structure
+          echo "Downloaded artifacts structure:"
+          ls -la /tmp/artifacts/
+
+          # Move each binary to the build context with correct naming for Docker
+          # Docker expects: caddy-${TARGETOS}-${TARGETARCH}
+          # We have: caddy-linux-amd64 and caddy-linux-arm64
+          for arch in amd64 arm64; do
+            if [ -d "/tmp/artifacts/caddy-linux-${arch}" ]; then
+              echo "Moving caddy-linux-${arch}"
+              cp -v "/tmp/artifacts/caddy-linux-${arch}/caddy-linux-${arch}" \
+                "container-images/${{ matrix.image }}/binaries/caddy-linux-${arch}"
+            fi
+          done
+
+          # Debug: Show final structure
+          echo "Final binaries structure:"
+          ls -la container-images/${{ matrix.image }}/binaries/
+
+          # Set permissions
+          chmod +x container-images/${{ matrix.image }}/binaries/*
+
+      - name: Download GeoIP database
+        if: matrix.image == 'caddy'
+        env:
+          MAXMIND_LICENSE_KEY: ${{ secrets.MAXMIND_LICENSE_KEY }}
+        run: |
+          mkdir -p container-images/${{ matrix.image }}/geoip
+          if [ -n "$MAXMIND_LICENSE_KEY" ]; then
+            wget "https://download.maxmind.com/app/geoip_download?edition_id=GeoLite2-Country&license_key=${MAXMIND_LICENSE_KEY}&suffix=tar.gz" -O /tmp/GeoLite2-Country.tar.gz
+            tar -xzf /tmp/GeoLite2-Country.tar.gz -C /tmp
+            cp /tmp/GeoLite2-Country_*/GeoLite2-Country.mmdb container-images/${{ matrix.image }}/geoip/
+            echo "GeoIP database downloaded successfully"
+          else
+            echo "MAXMIND_LICENSE_KEY not set, creating empty geoip directory"
+            # Create empty file to ensure COPY doesn't fail
+            touch container-images/${{ matrix.image }}/geoip/.placeholder
+          fi
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/${{ matrix.image }}
+          tags: |
+            type=edge,enable=true,priority=700,prefix=,suffix=,branch=$repo.default_branch
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=sha,format=short
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push Docker image
+        id: build
+        uses: docker/build-push-action@v5
+        with:
+          context: container-images/${{ matrix.image }}
+          file: container-images/${{ matrix.image }}/Dockerfile.prebuilt
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          platforms: linux/amd64,linux/arm64
+
+      - name: Run Trivy vulnerability scanner
+        if: github.event_name != 'pull_request'
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/${{ matrix.image }}@${{ steps.build.outputs.digest }}
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+
+      - name: Upload Trivy scan results to GitHub Security tab
+        if: github.event_name != 'pull_request' && github.repository == github.event.repository.full_name
+        uses: github/codeql-action/upload-sarif@v3
+        continue-on-error: true
+        with:
+          sarif_file: 'trivy-results.sarif'
