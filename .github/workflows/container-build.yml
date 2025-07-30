@@ -125,16 +125,16 @@ jobs:
         env:
           MAXMIND_LICENSE_KEY: ${{ secrets.MAXMIND_LICENSE_KEY }}
         run: |
-          mkdir -p container-images/geoip
+          mkdir -p container-images/binaries/geoip
           if [ -n "$MAXMIND_LICENSE_KEY" ]; then
             wget "https://download.maxmind.com/app/geoip_download?edition_id=GeoLite2-Country&license_key=${MAXMIND_LICENSE_KEY}&suffix=tar.gz" -O /tmp/GeoLite2-Country.tar.gz
             tar -xzf /tmp/GeoLite2-Country.tar.gz -C /tmp
-            cp /tmp/GeoLite2-Country_*/GeoLite2-Country.mmdb container-images/geoip/
+            cp /tmp/GeoLite2-Country_*/GeoLite2-Country.mmdb container-images/binaries/geoip/
             echo "GeoIP database downloaded successfully"
           else
             echo "MAXMIND_LICENSE_KEY not set, creating empty geoip directory"
             # Create empty file to ensure COPY doesn't fail
-            touch container-images/geoip/.placeholder
+            touch container-images/binaries/geoip/.placeholder
           fi
 
       - name: Set up QEMU
