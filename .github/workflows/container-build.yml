@@ -169,8 +169,8 @@ jobs:
         id: build
         uses: docker/build-push-action@v5
         with:
-          context: cloud-edge-node/container-images/caddy
-          file: cloud-edge-node/container-images/caddy/Dockerfile.prebuilt
+          context: container-images/binaries
+          file: Dockerfile.prebuilt
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
