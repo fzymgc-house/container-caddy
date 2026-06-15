@@ -97,10 +97,14 @@
     }
   },
   "pip_requirements": {
-    "fileMatch": ["(^|/)requirements\\.txt$"]
+    "managerFilePatterns": [
+      "/(^|/)requirements\\.txt$/"
+    ]
   },
   "ansible": {
-    "fileMatch": ["(^|/)requirements\\.ya?ml$"]
+    "managerFilePatterns": [
+      "/(^|/)requirements\\.ya?ml$/"
+    ]
   },
   "commitMessagePrefix": "chore(deps):",
   "commitMessageTopic": "{{depName}}",
